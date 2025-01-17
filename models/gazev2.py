@@ -83,15 +83,14 @@ class GazeEstimationModel(nn.Module):
         self.fusion = GazeFusion(output_dim * 2, output_dim)
 
     def forward(self, x):
-        features = self.encoder(x)  # Extract global features
-        capsules = self.capsule_formation(features)  # Generate capsules
-        routed_capsules = self.routing(capsules)  # Route capsules
+        B, T, C, H, W = x.size()  # Batch size, Temporal length, Channels, Height, Width
+        x = x.view(B * T, C, H, W)  # Flatten temporal dimension for encoder
+        features = self.encoder(x)  # Process with frozen encoder
+        features = features.view(B, T, -1)  # Reshape back to temporal sequences
 
-        # Decode region-specific gaze
-        eye_gaze = self.eye_decoder(routed_capsules)
-        face_gaze = self.face_decoder(routed_capsules)
-
-        # Fuse outputs
-        final_gaze = self.fusion([eye_gaze, face_gaze])
-        return final_gaze
+        # Pass through capsule layers and GRU
+        capsules = self.capsule_formation(features)
+        routed_capsules = self.routing(capsules)
+        output = self.eye_decoder(routed_capsules)
+        return output
 

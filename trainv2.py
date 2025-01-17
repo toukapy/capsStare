@@ -9,30 +9,49 @@ import os
 from tqdm import tqdm
 
 class GazeDataset(Dataset):
-    def __init__(self, h5_files):
+    def __init__(self, h5_files, sequence_length=5):
         self.h5_files = h5_files
         self.fids = [h5py.File(h5_file, 'r') for h5_file in h5_files]
-        self.num_data = sum(fid["face_patch"].shape[0] for fid in self.fids)
-        self.file_indices = np.cumsum([0] + [fid["face_patch"].shape[0] for fid in self.fids])
+        self.sequence_length = sequence_length
+
+        # Compute number of sequences
+        self.num_data = sum(
+            max(0, fid["face_patch"].shape[0] - sequence_length + 1) for fid in self.fids
+        )
+        self.file_indices = np.cumsum([0] + [
+            max(0, fid["face_patch"].shape[0] - sequence_length + 1) for fid in self.fids
+        ])
 
     def __len__(self):
         return self.num_data
 
     def __getitem__(self, idx):
+        # Determine the file and local index
         file_idx = np.searchsorted(self.file_indices, idx, side='right') - 1
         local_idx = idx - self.file_indices[file_idx]
         fid = self.fids[file_idx]
 
-        face_patch = fid['face_patch'][local_idx, :]
-        face_patch = cv2.resize(face_patch, (224, 224))  # Resize to match model input size
-        face_patch = torch.tensor(face_patch).permute(2, 0, 1).float() / 255.0  # Normalize to [0, 1]
+        # Extract a sequence
+        face_patches = [
+            cv2.resize(fid['face_patch'][local_idx + i], (224, 224))
+            for i in range(self.sequence_length)
+        ]
+        face_patches = torch.stack([
+            torch.tensor(patch).permute(2, 0, 1).float() / 255.0 for patch in face_patches
+        ])  # Shape: (sequence_length, 3, 224, 224)
 
+        # Extract corresponding gaze (or zeros if unavailable)
         if 'face_gaze' in fid.keys():
-            gaze = fid['face_gaze'][local_idx, :]
+            gazes = [
+                torch.tensor(fid['face_gaze'][local_idx + i]).float()
+                for i in range(self.sequence_length)
+            ]
         else:
-            gaze = np.zeros(2)
+            gazes = [torch.zeros(2) for _ in range(self.sequence_length)]
 
-        return face_patch, torch.tensor(gaze).float()
+        gazes = torch.stack(gazes)  # Shape: (sequence_length, 2)
+
+        return face_patches, gazes
 
 # Initialize dataset and dataloader
 train_dir = 'E:/Datasets/xgaze_448/train'
@@ -46,8 +65,9 @@ train_files, val_files = random_split(h5_files, [train_size, val_size])
 train_dataset = GazeDataset(train_files)
 val_dataset = GazeDataset(val_files)
 
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, drop_last=True)
+val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False, drop_last=True)
+
 
 print("Train and validation dataloaders ready")
 
