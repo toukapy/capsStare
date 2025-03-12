@@ -2,18 +2,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
+from torchvision.models import convnext_base, ConvNeXt_Base_Weights
+
 
 class FrozenEncoder(nn.Module):
-    """ Frozen backbone for feature extraction using EfficientNet-B4."""
-    def __init__(self, trainable_layers=5):
+    """Frozen backbone for feature extraction using ConvNeXt-Base."""
+
+    def __init__(self, trainable_layers=10):
         super(FrozenEncoder, self).__init__()
-        base_model = efficientnet_b4(weights=EfficientNet_B4_Weights.IMAGENET1K_V1)
-        self.features = nn.Sequential(*list(base_model.children())[:-2])
+        # Load the ConvNeXt-Base model with pretrained weights.
+        base_model = convnext_base(weights=ConvNeXt_Base_Weights.IMAGENET1K_V1)
+
+        # Use the features from the ConvNeXt model.
+        # In torchvision's implementation, `base_model.features` contains all the convolutional blocks.
+        self.features = base_model.features
+
+        # Freeze all parameters in the feature extractor.
         for param in self.features.parameters():
             param.requires_grad = False
+
+        # Unfreeze the last few parameters (or blocks) as specified by trainable_layers.
+        # Note: This simple approach unfreezes the last 'trainable_layers' parameters; depending on your needs,
+        # you might want to unfreeze whole blocks instead.
         for param in list(self.features.parameters())[-trainable_layers:]:
             param.requires_grad = True
-        self.norm = nn.BatchNorm2d(1792)
+
+        # The output channels of convnext_base are 1024.
+        self.norm = nn.BatchNorm2d(1024)
 
     def forward(self, x):
         features = self.features(x)
@@ -28,7 +43,7 @@ class CapsuleFormation(nn.Module):
         self.linear = nn.Linear(input_dim, num_capsules * capsule_dim)
         self.norm = nn.LayerNorm(capsule_dim)
         self.activation = nn.GELU()
-        self.dropout = nn.Dropout(p=0.5)  # Added Dropout
+        self.dropout = nn.Dropout(p=0.3)  # Added Dropout
 
     def forward(self, features):
         if len(features.size()) == 3:  # Handle inputs already flattened
@@ -77,7 +92,7 @@ class RegionDecoder(nn.Module):
         super(RegionDecoder, self).__init__()
         self.gru = nn.GRU(capsule_dim, hidden_dim, batch_first=True)
         self.fc = nn.Linear(hidden_dim, output_dim)
-        self.dropout = nn.Dropout(p=0.5)  # Added Dropout
+        self.dropout = nn.Dropout(p=0.3)  # Added Dropout
 
     def forward(self, capsules):
         if len(capsules.size()) == 3:
@@ -100,7 +115,7 @@ class GazeFusion(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(GazeFusion, self).__init__()
         self.fc = nn.Linear(input_dim, output_dim)
-        self.dropout = nn.Dropout(p=0.5)  # Added Dropout
+        self.dropout = nn.Dropout(p=0.3)  # Added Dropout
 
     def forward(self, regions):
         if isinstance(regions, list):
@@ -114,7 +129,7 @@ class GazeEstimationModel(nn.Module):
     def __init__(self, encoder, capsule_dim=64, hidden_dim=128, output_dim=2):
         super(GazeEstimationModel, self).__init__()
         self.encoder = encoder
-        self.capsule_formation = CapsuleFormation(input_dim=87808, num_capsules=8, capsule_dim=capsule_dim)
+        self.capsule_formation = CapsuleFormation(input_dim=50176, num_capsules=8, capsule_dim=capsule_dim)
         self.routing = SelfAttentionRouting(num_capsules=8, capsule_dim=capsule_dim)
         self.eye_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
         self.face_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
@@ -124,7 +139,7 @@ class GazeEstimationModel(nn.Module):
         B, T, C, H, W = x.size()
         x = x.view(B * T, C, H, W)
         features = self.encoder(x)
-        features = features.view(B, T, -1)
+        features = features.reshape(B, T, -1)
         capsules = self.capsule_formation(features)
         routed_capsules = self.routing(capsules)
         eye_output = self.eye_decoder(routed_capsules)

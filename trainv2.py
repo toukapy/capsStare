@@ -100,7 +100,7 @@ def angular_error_2d_fixed_origin(gt_2d, pred_2d, origin=(112, 180)):  # Adjuste
 
 
 class GazeDataset(Dataset):
-    def __init__(self, h5_files, sequence_length=5, transform=None):
+    def __init__(self, h5_files, sequence_length=9, transform=None):
         self.h5_files = h5_files
         self.fids = [h5py.File(h5_file, 'r') for h5_file in h5_files]
         self.sequence_length = sequence_length
@@ -154,19 +154,25 @@ transforms.Normalize(
         std=[0.229, 0.224, 0.225])
 ])
 
-train_dir = 'xgaze_448/train'
+# Directorio con los archivos .h5
+train_dir = 'xgaze_224/train'
 h5_files = [os.path.join(train_dir, f) for f in os.listdir(train_dir) if f.endswith('.h5')]
-random.shuffle(h5_files)  # Shuffle before train-validation split
 
+# Mezclar la lista de sujetos
+random.shuffle(h5_files)
+
+# Dividir en 80% para entrenamiento y 20% para validación (cada archivo es un sujeto)
 train_size = int(0.8 * len(h5_files))
-val_size = len(h5_files) - train_size
-train_files, val_files = random_split(h5_files, [train_size, val_size])
+train_files = h5_files[:train_size]
+val_files = h5_files[train_size:]
+
+print(f"Total subjects: {len(h5_files)}, Training subjects: {len(train_files)}, Validation subjects: {len(val_files)}")
 
 train_dataset = GazeDataset(train_files, transform=transform)
 val_dataset = GazeDataset(val_files, transform=transform)
 
 train_sample_size = 50000
-val_sample_size = 10000
+val_sample_size = 20000
 
 train_indices = random.sample(range(len(train_dataset)), train_sample_size)
 val_indices = random.sample(range(len(val_dataset)), val_sample_size)
@@ -174,18 +180,17 @@ val_indices = random.sample(range(len(val_dataset)), val_sample_size)
 train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(val_dataset, val_indices)
 
-train_loader = DataLoader(train_subset, batch_size=32, shuffle=True, drop_last=True)
-val_loader = DataLoader(val_subset
-                        , batch_size=32, shuffle=False, drop_last=True)
+train_loader = DataLoader(train_subset, batch_size=64, shuffle=True, drop_last=True)
+val_loader = DataLoader(val_subset, batch_size=64, shuffle=False, drop_last=True)
 
 accelerator = Accelerator()
 
 encoder = FrozenEncoder()
 model = GazeEstimationModel(encoder, output_dim=2).cuda()
 #model.load_state_dict(torch.load('best_gaze_model.pth'))
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-5)
 criterion = nn.MSELoss()
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
 
 train_loader, model, optimizer, scheduler = accelerator.prepare(
     train_loader, model, optimizer, scheduler
@@ -196,12 +201,12 @@ patience_limit = 15
 patience_counter = 0
 best_model_path = 'best_gaze_model.pth'
 
-for epoch in range(100):
+for epoch in range(30):
     model.train()
     total_loss = 0
     total_angular_error = 0
     samples = 0
-    train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]")
+    train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]")
 
     for images, targets in train_loader_tqdm:
         # images shape: (batch_size, sequence_length, C, H, W)
@@ -227,7 +232,7 @@ for epoch in range(100):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        total_loss += loss.item()
+        total_loss += criterion(predictions, targets).item()
 
         # Compute angular error for the batch
         batch_angular_errors = []
@@ -241,7 +246,7 @@ for epoch in range(100):
         samples += 1
 
 
-        train_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}", angular_error=f"{np.mean(batch_angular_errors):.2f}")
+        train_loader_tqdm.set_postfix(loss=f"{criterion(predictions, targets).item():.4f}", angular_error=f"{np.mean(batch_angular_errors):.2f}")
 
     avg_train_loss = total_loss / len(train_loader)
     avg_train_angular_error = total_angular_error / len(train_loader)
@@ -252,7 +257,7 @@ for epoch in range(100):
     val_loss = 0
     val_angular_error = 0
     samples = 0
-    val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Validation]")
+    val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Val]")
     with torch.no_grad():
         for images, targets in val_loader_tqdm:
             batch_size, seq_length, C, H, W = images.shape  # (32, 5, 3, 224, 224)
