@@ -11,30 +11,19 @@ import random
 import torchvision.transforms.v2 as F
 from accelerate import Accelerator
 
-# Optimización CUDA
 import torch.backends.cudnn as cudnn
-
-cudnn.benchmark = True  # Optimiza cuDNN para mejor rendimiento en GPU
-
-# Asegurar que todo se ejecuta en GPU
+cudnn.benchmark = True
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
-
-
-
-def angular_error_2d_fixed_origin(gt_2d, pred_2d):
-    gt_vector = np.array(gt_2d)
-    pred_vector = np.array(pred_2d)
-    gt_3d = np.array([gt_vector[0], gt_vector[1], 1.0])
-    pred_3d = np.array([pred_vector[0], pred_vector[1], 1.0])
-    gt_3d /= np.linalg.norm(gt_3d)
-    pred_3d /= np.linalg.norm(pred_3d)
-    dot_product = np.clip(np.dot(gt_3d, pred_3d), -1.0, 1.0)
+def angular_error_3d(gt, pred):
+    """
+    Calcula el error angular entre dos vectores de mirada 2D.
+    """
+    gt_norm = gt / np.linalg.norm(gt)
+    pred_norm = pred / np.linalg.norm(pred)
+    dot_product = np.clip(np.dot(gt_norm, pred_norm), -1.0, 1.0)
     angle_rad = np.arccos(dot_product)
     return np.degrees(angle_rad)
-
 
 class GazeDataset(Dataset):
     def __init__(self, h5_files, sequence_length=9, transform=None):
@@ -58,31 +47,36 @@ class GazeDataset(Dataset):
         fid = self.fids[file_idx]
 
         face_patches = torch.stack([
-            torch.tensor(cv2.resize(fid['face_patch'][local_idx + i], (224, 224))).permute(2, 0, 1).float() / 255.0
+            torch.tensor(cv2.resize(fid['face_patch'][local_idx + i], (224, 224)))
+                  .permute(2, 0, 1).float() / 255.0
             for i in range(self.sequence_length)
         ])
-
         if self.transform:
             face_patches = torch.stack([self.transform(patch) for patch in face_patches])
 
+        # Anotación de mirada (target)
         gazes = torch.stack([
             torch.tensor(fid['face_gaze'][local_idx + i]).float()
             for i in range(self.sequence_length)
         ]) if 'face_gaze' in fid.keys() else torch.zeros(self.sequence_length, 2)
 
-        return face_patches, gazes
+        # Extracción del head pose (información de la pose normalizada de la cabeza)
+        head_poses = torch.stack([
+            torch.tensor(fid['face_head_pose'][local_idx + i]).float()
+            for i in range(self.sequence_length)
+        ]) if 'face_head_pose' in fid.keys() else torch.zeros(self.sequence_length, 2)
+
+        return face_patches, gazes, head_poses
 
 if __name__ == "__main__":
-
-    # Transformaciones optimizadas
     transform = transforms.Compose([
         transforms.ToPILImage(),
         F.ToDtype(torch.float32, scale=True),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
     ])
 
-    # Carga de datos optimizada
     train_dir = 'xgaze_224/train'
     h5_files = [os.path.join(train_dir, f) for f in os.listdir(train_dir) if f.endswith('.h5')]
     random.shuffle(h5_files)
@@ -93,15 +87,15 @@ if __name__ == "__main__":
     train_dataset = GazeDataset(train_files, transform=transform)
     val_dataset = GazeDataset(val_files, transform=transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, drop_last=True, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, drop_last=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, drop_last=True, num_workers=4, pin_memory=True)
 
-    # Modelo y entrenamiento optimizado
-    from models.gazev2_transformer import FrozenEncoder, GazeEstimationModel
+    from models.gazev2_3d import FrozenEncoder, GazeEstimationModel
 
     encoder = FrozenEncoder()
+    # Usamos output_dim=2 para la mirada en 2D (pitch, yaw)
     model = GazeEstimationModel(encoder, output_dim=2).to(device)
-    model = torch.compile(model)  # PyTorch 2.0 optimization
+    model = torch.compile(model)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-5)
     criterion = nn.MSELoss()
@@ -110,21 +104,22 @@ if __name__ == "__main__":
     train_loader, model, optimizer, scheduler = accelerator.prepare(train_loader, model, optimizer, scheduler)
 
     best_val_loss, patience_counter, patience_limit = float('inf'), 0, 15
-    scaler = torch.cuda.amp.GradScaler()  # Mixed Precision Training
+    scaler = torch.cuda.amp.GradScaler()
 
     for epoch in range(30):
         model.train()
         total_loss, total_angular_error = 0, 0
         train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]")
 
-        for images, targets in train_loader_tqdm:
-            images, targets = images.to(device), targets.to(device)
+        for images, targets, head_poses in train_loader_tqdm:
+            images, targets, head_poses = images.to(device), targets.to(device), head_poses.to(device)
             optimizer.zero_grad()
 
             with torch.cuda.amp.autocast():
-                predictions = model(images)
-                targets = targets[:, -1, :]
-                loss = criterion(predictions, targets)
+                # Se pasa el head pose al modelo
+                predictions = model(images, head_poses)
+                targets_last = targets[:, -1, :]
+                loss = criterion(predictions, targets_last)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -133,8 +128,9 @@ if __name__ == "__main__":
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             batch_angular_errors = [
-                angular_error_2d_fixed_origin(targets[i].cpu().numpy(), predictions[i].detach().cpu().numpy()) for i in
-                range(predictions.shape[0])]
+                angular_error_3d(targets_last[i].cpu().numpy(), predictions[i].detach().cpu().numpy())
+                for i in range(predictions.shape[0])
+            ]
             total_angular_error += np.mean(batch_angular_errors)
             total_loss += loss.item()
             train_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}", angular_error=f"{np.mean(batch_angular_errors):.2f}")
@@ -143,23 +139,20 @@ if __name__ == "__main__":
         avg_train_angular_error = total_angular_error / len(train_loader)
         print(f"Training Loss: {avg_train_loss:.4f}, Angular Error: {avg_train_angular_error:.2f}°")
 
-        # Validation phase
         model.eval()
         val_loss, val_angular_error = 0, 0
-        val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Validation]")
         with torch.no_grad():
-            for images, targets in val_loader_tqdm:
-                images, targets = images.to(device), targets.to(device)
-                predictions = model(images)
-                targets = targets[:, -1, :]
-                loss = criterion(predictions, targets)
+            for images, targets, head_poses in val_loader:
+                images, targets, head_poses = images.to(device), targets.to(device), head_poses.to(device)
+                predictions = model(images, head_poses)
+                targets_last = targets[:, -1, :]
+                loss = criterion(predictions, targets_last)
                 val_loss += loss.item()
                 batch_angular_errors = [
-                    angular_error_2d_fixed_origin(targets[i].cpu().numpy(), predictions[i].detach().cpu().numpy()) for i in
-                    range(predictions.shape[0])]
+                    angular_error_3d(targets_last[i].cpu().numpy(), predictions[i].detach().cpu().numpy())
+                    for i in range(predictions.shape[0])
+                ]
                 val_angular_error += np.mean(batch_angular_errors)
-                val_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}",
-                                              angular_error=f"{np.mean(batch_angular_errors):.2f}")
 
         avg_val_loss = val_loss / len(val_loader)
         avg_val_angular_error = val_angular_error / len(val_loader)
