@@ -96,6 +96,7 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, drop_last=True, num_workers=4, pin_memory=True)
 
+
     # Modelo y entrenamiento optimizado
     from models.gazev2_transformer import FrozenEncoder, GazeEstimationModel
 
@@ -103,7 +104,7 @@ if __name__ == "__main__":
     model = GazeEstimationModel(encoder, output_dim=2).to(device)
     model = torch.compile(model)  # PyTorch 2.0 optimization
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
     criterion = nn.MSELoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
     accelerator = Accelerator()
@@ -113,56 +114,77 @@ if __name__ == "__main__":
     scaler = torch.cuda.amp.GradScaler()  # Mixed Precision Training
 
     for epoch in range(30):
+        # ---------------------------
+        # Training Phase
+        # ---------------------------
         model.train()
-        total_loss, total_angular_error = 0, 0
-        train_loader_tqdm = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Train]")
+        total_train_loss = 0.0
+        total_train_angular_error = 0.0
 
-        for images, targets in train_loader_tqdm:
+        train_progress = tqdm(train_loader, desc=f"Epoch {epoch + 1} [Training]")
+        for images, targets in train_progress:
             images, targets = images.to(device), targets.to(device)
             optimizer.zero_grad()
 
+            # Use autocast for mixed precision training
             with torch.cuda.amp.autocast():
                 predictions = model(images)
-                targets = targets[:, -1, :]
-                loss = criterion(predictions, targets)
+                # Use only the last target in the sequence
+                targets_last = targets[:, -1, :]
+                loss = criterion(predictions, targets_last)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-            batch_angular_errors = [
-                angular_error_2d_fixed_origin(targets[i].cpu().numpy(), predictions[i].detach().cpu().numpy()) for i in
-                range(predictions.shape[0])]
-            total_angular_error += np.mean(batch_angular_errors)
-            total_loss += loss.item()
-            train_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}", angular_error=f"{np.mean(batch_angular_errors):.2f}")
+            # Compute angular error for the batch
+            batch_errors = [
+                angular_error_2d_fixed_origin(
+                    targets_last[i].cpu().numpy(),
+                    predictions[i].detach().cpu().numpy()
+                ) for i in range(predictions.shape[0])
+            ]
+            mean_batch_error = np.mean(batch_errors)
+            total_train_loss += loss.item()
+            total_train_angular_error += mean_batch_error
 
-        avg_train_loss = total_loss / len(train_loader)
-        avg_train_angular_error = total_angular_error / len(train_loader)
+            train_progress.set_postfix(loss=f"{loss.item():.4f}", angular_error=f"{mean_batch_error:.2f}")
+
+        avg_train_loss = total_train_loss / len(train_loader)
+        avg_train_angular_error = total_train_angular_error / len(train_loader)
         print(f"Training Loss: {avg_train_loss:.4f}, Angular Error: {avg_train_angular_error:.2f}°")
 
-        # Validation phase
+        # ---------------------------
+        # Validation Phase
+        # ---------------------------
         model.eval()
-        val_loss, val_angular_error = 0, 0
-        val_loader_tqdm = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Validation]")
-        with torch.no_grad():
-            for images, targets in val_loader_tqdm:
+        total_val_loss = 0.0
+        total_val_angular_error = 0.0
+
+        # Ensure validation runs under the same autocasting rules as training.
+        val_progress = tqdm(val_loader, desc=f"Epoch {epoch + 1} [Validation]")
+        with torch.no_grad(), torch.cuda.amp.autocast():
+            for images, targets in val_progress:
                 images, targets = images.to(device), targets.to(device)
                 predictions = model(images)
-                targets = targets[:, -1, :]
-                loss = criterion(predictions, targets)
-                val_loss += loss.item()
-                batch_angular_errors = [
-                    angular_error_2d_fixed_origin(targets[i].cpu().numpy(), predictions[i].detach().cpu().numpy()) for i in
-                    range(predictions.shape[0])]
-                val_angular_error += np.mean(batch_angular_errors)
-                val_loader_tqdm.set_postfix(loss=f"{loss.item():.4f}",
-                                              angular_error=f"{np.mean(batch_angular_errors):.2f}")
+                targets_last = targets[:, -1, :]
+                loss = criterion(predictions, targets_last)
+                total_val_loss += loss.item()
 
-        avg_val_loss = val_loss / len(val_loader)
-        avg_val_angular_error = val_angular_error / len(val_loader)
+                batch_errors = [
+                    angular_error_2d_fixed_origin(
+                        targets_last[i].cpu().numpy(),
+                        predictions[i].detach().cpu().numpy()
+                    ) for i in range(predictions.shape[0])
+                ]
+                mean_batch_error = np.mean(batch_errors)
+                total_val_angular_error += mean_batch_error
+
+                val_progress.set_postfix(loss=f"{loss.item():.4f}", angular_error=f"{mean_batch_error:.2f}")
+
+        avg_val_loss = total_val_loss / len(val_loader)
+        avg_val_angular_error = total_val_angular_error / len(val_loader)
         print(f"Validation Loss: {avg_val_loss:.4f}, Angular Error: {avg_val_angular_error:.2f}°")
 
         scheduler.step(avg_val_loss)
