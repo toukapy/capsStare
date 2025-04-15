@@ -1,39 +1,71 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
-from torchvision.models import convnext_base, ConvNeXt_Base_Weights
+from torchvision.models import vit_b_16, ViT_B_16_Weights
 
 
 class FrozenEncoder(nn.Module):
-    """Frozen backbone for feature extraction using ConvNeXt-Base."""
+    """Frozen backbone for feature extraction using a Vision Transformer (ViT)."""
 
-    def __init__(self, trainable_layers=10):
+    def __init__(self, trainable_layers=0):
         super(FrozenEncoder, self).__init__()
-        # Load the ConvNeXt-Base model with pretrained weights.
-        base_model = convnext_base(weights=ConvNeXt_Base_Weights.IMAGENET1K_V1)
-
-        # Use the features from the ConvNeXt model.
-        # In torchvision's implementation, `base_model.features` contains all the convolutional blocks.
-        self.features = base_model.features
-
-        # Freeze all parameters in the feature extractor.
-        for param in self.features.parameters():
+        # Load the pretrained ViT model.
+        base_model = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
+        for param in base_model.parameters():
             param.requires_grad = False
 
-        # Unfreeze the last few parameters (or blocks) as specified by trainable_layers.
-        # Note: This simple approach unfreezes the last 'trainable_layers' parameters; depending on your needs,
-        # you might want to unfreeze whole blocks instead.
-        for param in list(self.features.parameters())[-trainable_layers:]:
-            param.requires_grad = True
+        # Optionally unfreeze the last few transformer blocks.
+        if trainable_layers > 0:
+            for block in base_model.blocks[-trainable_layers:]:
+                for param in block.parameters():
+                    param.requires_grad = True
 
-        # The output channels of convnext_base are 1024.
-        self.norm = nn.BatchNorm2d(1024)
+        # Remove the classification head.
+        base_model.head = nn.Identity()
+        self.transformer = base_model
+
+        # Get the embedding dimension from the class token.
+        embed_dim = self.transformer.class_token.shape[-1]
+
+        # Use positional embeddings if available; otherwise, create our own.
+        if hasattr(base_model, "pos_embed"):
+            self.pos_embed = base_model.pos_embed
+        else:
+            # For vit_b_16: image_size=224, patch_size=16 -> 14x14 patches + 1 class token = 197 tokens.
+            num_tokens = 1 + (224 // 16) ** 2
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, embed_dim))
+            nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward_features(self, x):
+        # Patch embedding
+        x = self.transformer.conv_proj(x)  # (B, D, H', W')
+        B, D, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2)
+        # Prepend the class token
+        cls_tokens = self.transformer.class_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        # Add positional embeddings (using our custom pos_embed)
+        x = x + self.pos_embed
+        if hasattr(self.transformer, "pos_drop"):
+            x = self.transformer.pos_drop(x)
+        # Use the encoder layers (Torchvision ViT uses transformer.encoder.layers)
+        for block in self.transformer.encoder.layers:
+            x = block(x)
+        # If a final normalization exists, use it; otherwise, skip.
+        if hasattr(self.transformer, "norm"):
+            x = self.transformer.norm(x)
+        return x
 
     def forward(self, x):
-        features = self.features(x)
-        features = self.norm(features)
-        return features
+        features = self.forward_features(x)  # (B, num_tokens, D)
+        # Remove the class token to get patch tokens.
+        patch_tokens = features[:, 1:]
+        B, N, D = patch_tokens.shape
+        patch_dim = int(N ** 0.5)
+        # Reshape tokens into a 2D feature map.
+        patch_tokens = patch_tokens.transpose(1, 2).view(B, D, patch_dim, patch_dim)
+        return patch_tokens
+
 
 class CapsuleFormation(nn.Module):
     def __init__(self, input_dim, num_capsules, capsule_dim):
@@ -129,7 +161,7 @@ class GazeEstimationModel(nn.Module):
     def __init__(self, encoder, capsule_dim=64, hidden_dim=128, output_dim=2):
         super(GazeEstimationModel, self).__init__()
         self.encoder = encoder
-        self.capsule_formation = CapsuleFormation(input_dim=50176, num_capsules=8, capsule_dim=capsule_dim)
+        self.capsule_formation = CapsuleFormation(input_dim=150528, num_capsules=8, capsule_dim=capsule_dim)
         self.routing = SelfAttentionRouting(num_capsules=8, capsule_dim=capsule_dim)
         self.eye_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
         self.face_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)

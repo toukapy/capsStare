@@ -1,39 +1,74 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
-from torchvision.models import convnext_base, ConvNeXt_Base_Weights
+from torchvision.models import vit_b_16, ViT_B_16_Weights
+from torchvision.models import swin_b, Swin_B_Weights
+
+import torch
+import torch.nn as nn
+from torchvision.models import swin_b, Swin_B_Weights
 
 
 class FrozenEncoder(nn.Module):
-    """Frozen backbone for feature extraction using ConvNeXt-Base."""
+    """
+    Backbone para extracción de características utilizando un Swin Transformer.
+    Por defecto, se congelan todos los parámetros, pero se pueden descongelar
+    las últimas capas especificando el parámetro 'trainable_layers'.
 
-    def __init__(self, trainable_layers=10):
+    Ejemplo:
+      - trainable_layers=0: congela todo el modelo.
+      - trainable_layers=1: descongela la última capa (o bloque) según la estructura.
+    """
+
+    def __init__(self, trainable_layers=0):
         super(FrozenEncoder, self).__init__()
-        # Load the ConvNeXt-Base model with pretrained weights.
-        base_model = convnext_base(weights=ConvNeXt_Base_Weights.IMAGENET1K_V1)
+        # Cargar modelo swin_b preentrenado con pesos de ImageNet.
+        base_model = swin_b(weights=Swin_B_Weights.IMAGENET1K_V1)
 
-        # Use the features from the ConvNeXt model.
-        # In torchvision's implementation, `base_model.features` contains all the convolutional blocks.
-        self.features = base_model.features
-
-        # Freeze all parameters in the feature extractor.
-        for param in self.features.parameters():
+        # Congelar todos los parámetros.
+        for param in base_model.parameters():
             param.requires_grad = False
 
-        # Unfreeze the last few parameters (or blocks) as specified by trainable_layers.
-        # Note: This simple approach unfreezes the last 'trainable_layers' parameters; depending on your needs,
-        # you might want to unfreeze whole blocks instead.
-        for param in list(self.features.parameters())[-trainable_layers:]:
-            param.requires_grad = True
+        # Intentar obtener los bloques del transformer.
+        # Dependiendo de la versión, el modelo puede tener 'layers' o 'features'.
+        layers = getattr(base_model, 'layers', None)
+        if layers is None:
+            layers = getattr(base_model, 'features', None)
+        if layers is None:
+            raise AttributeError(
+                "El modelo SwinTransformer no tiene 'layers' ni 'features' para acceder a los bloques.")
 
-        # The output channels of convnext_base are 1024.
-        self.norm = nn.BatchNorm2d(1024)
+        # Descongelar las últimas 'trainable_layers' capas.
+        if trainable_layers > 0:
+            for layer in layers[-trainable_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+
+        # Reemplazar el head de clasificación por una capa identidad.
+        base_model.head = nn.Identity()
+        self.transformer = base_model
 
     def forward(self, x):
-        features = self.features(x)
-        features = self.norm(features)
+        """
+        Paso forward para extraer características.
+
+        Se utiliza forward_features o _forward_features (si existen),
+        o se recurre a forward() en caso de no existir.
+
+        Args:
+            x (torch.Tensor): Imagen de entrada (B, 3, H, W)
+
+        Returns:
+            torch.Tensor: Características extraídas.
+        """
+        if hasattr(self.transformer, 'forward_features'):
+            features = self.transformer.forward_features(x)
+        elif hasattr(self.transformer, '_forward_features'):
+            features = self.transformer._forward_features(x)
+        else:
+            features = self.transformer(x)
         return features
+
 
 class CapsuleFormation(nn.Module):
     def __init__(self, input_dim, num_capsules, capsule_dim):
@@ -129,7 +164,7 @@ class GazeEstimationModel(nn.Module):
     def __init__(self, encoder, capsule_dim=64, hidden_dim=128, output_dim=2):
         super(GazeEstimationModel, self).__init__()
         self.encoder = encoder
-        self.capsule_formation = CapsuleFormation(input_dim=50176, num_capsules=8, capsule_dim=capsule_dim)
+        self.capsule_formation = CapsuleFormation(input_dim=1024, num_capsules=8, capsule_dim=capsule_dim)
         self.routing = SelfAttentionRouting(num_capsules=8, capsule_dim=capsule_dim)
         self.eye_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
         self.face_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
