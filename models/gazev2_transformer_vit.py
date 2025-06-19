@@ -161,8 +161,8 @@ class GazeEstimationModel(nn.Module):
     def __init__(self, encoder, capsule_dim=64, hidden_dim=128, output_dim=2):
         super(GazeEstimationModel, self).__init__()
         self.encoder = encoder
-        self.capsule_formation = CapsuleFormation(input_dim=150528, num_capsules=8, capsule_dim=capsule_dim)
-        self.routing = SelfAttentionRouting(num_capsules=8, capsule_dim=capsule_dim)
+        self.capsule_formation = CapsuleFormation(input_dim=150528, num_capsules=4, capsule_dim=capsule_dim)
+        self.routing = SelfAttentionRouting(num_capsules=4, capsule_dim=capsule_dim)
         self.eye_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
         self.face_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
         self.fusion = GazeFusion(output_dim * 2, output_dim)

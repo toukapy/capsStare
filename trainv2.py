@@ -10,6 +10,9 @@ from torchvision import transforms
 import random
 import torchvision.transforms.v2 as F
 from accelerate import Accelerator
+from collections import OrderedDict
+import wandb
+
 
 # Optimización CUDA
 import torch.backends.cudnn as cudnn
@@ -22,8 +25,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
-
-
 def angular_error_2d_fixed_origin(gt_2d, pred_2d):
     gt_vector = np.array(gt_2d)
     pred_vector = np.array(pred_2d)
@@ -34,7 +35,6 @@ def angular_error_2d_fixed_origin(gt_2d, pred_2d):
     dot_product = np.clip(np.dot(gt_3d, pred_3d), -1.0, 1.0)
     angle_rad = np.arccos(dot_product)
     return np.degrees(angle_rad)
-
 
 class GazeDataset(Dataset):
     def __init__(self, h5_files, sequence_length=9, transform=None):
@@ -72,7 +72,28 @@ class GazeDataset(Dataset):
 
         return face_patches, gazes
 
+
+def strip_prefix(state_dict, prefix="_orig_mod."):
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            new_k = k[len(prefix):]
+        else:
+            new_k = k
+        new_state_dict[new_k] = v
+    return new_state_dict
+
+
 if __name__ == "__main__":
+
+    wandb.init(project="gaze-estimation", name="gazev2-shared-run", config={
+        "batch_size": 32,
+        "learning_rate": 1e-5,
+        "weight_decay": 1e-5,
+        "optimizer": "Adam",
+        "epochs": 30,
+        "scheduler": "CosineAnnealingLR"
+    })
 
     # Transformaciones optimizadas
     transform = transforms.Compose([
@@ -90,22 +111,38 @@ if __name__ == "__main__":
     train_size = int(0.8 * len(h5_files))
     train_files, val_files = h5_files[:train_size], h5_files[train_size:]
 
+
+
     train_dataset = GazeDataset(train_files, transform=transform)
     val_dataset = GazeDataset(val_files, transform=transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, drop_last=True, num_workers=4, pin_memory=True)
+    train_sample_size = 1000
+    val_sample_size = 200
+
+    train_indices = random.sample(range(len(train_dataset)), train_sample_size)
+    val_indices = random.sample(range(len(val_dataset)), val_sample_size)
+
+    train_subset = Subset(train_dataset, train_indices)
+    val_subset = Subset(val_dataset, val_indices)
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4, pin_memory=False)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, drop_last=True, num_workers=4, pin_memory=False)
 
 
     # Modelo y entrenamiento optimizado
-    from models.gazev2_transformer import FrozenEncoder, GazeEstimationModel
+    from models.gazev2_noatt import FrozenEncoder, GazeEstimationModel
 
     encoder = FrozenEncoder()
     model = GazeEstimationModel(encoder, output_dim=2).to(device)
+
+    checkpoint = torch.load('17062025.pth')
+    state_dict = strip_prefix(checkpoint)
+    model.load_state_dict(state_dict, strict=False)
     model = torch.compile(model)  # PyTorch 2.0 optimization
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6, weight_decay=1e-5)
     criterion = nn.MSELoss()
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
     accelerator = Accelerator()
     train_loader, model, optimizer, scheduler = accelerator.prepare(train_loader, model, optimizer, scheduler)
@@ -197,3 +234,11 @@ if __name__ == "__main__":
         if patience_counter >= patience_limit:
             print("Early stopping triggered!")
             break
+
+        wandb.log({
+            "train_loss": avg_train_loss,
+            "train_angular_error": avg_train_angular_error,
+            "val_loss": avg_val_loss,
+            "val_angular_error": avg_val_angular_error,
+            "epoch": epoch + 1
+        })

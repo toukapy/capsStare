@@ -8,7 +8,7 @@ from torchvision.models import convnext_base, ConvNeXt_Base_Weights
 class FrozenEncoder(nn.Module):
     """Frozen backbone for feature extraction using ConvNeXt-Base."""
 
-    def __init__(self, trainable_layers=10):
+    def __init__(self, trainable_layers=0):
         super(FrozenEncoder, self).__init__()
         # Load the ConvNeXt-Base model with pretrained weights.
         base_model = convnext_base(weights=ConvNeXt_Base_Weights.IMAGENET1K_V1)
@@ -24,8 +24,7 @@ class FrozenEncoder(nn.Module):
         # Unfreeze the last few parameters (or blocks) as specified by trainable_layers.
         # Note: This simple approach unfreezes the last 'trainable_layers' parameters; depending on your needs,
         # you might want to unfreeze whole blocks instead.
-        for param in list(self.features.parameters())[-trainable_layers:]:
-            param.requires_grad = True
+
 
         # The output channels of convnext_base are 1024.
         self.norm = nn.BatchNorm2d(1024)
@@ -126,11 +125,11 @@ class GazeFusion(nn.Module):
         return self.fc(fused)
 
 class GazeEstimationModel(nn.Module):
-    def __init__(self, encoder, capsule_dim=64, hidden_dim=128, output_dim=2):
+    def __init__(self, encoder, capsule_dim=256, hidden_dim=256, output_dim=2):
         super(GazeEstimationModel, self).__init__()
         self.encoder = encoder
-        self.capsule_formation = CapsuleFormation(input_dim=50176, num_capsules=8, capsule_dim=capsule_dim)
-        self.routing = SelfAttentionRouting(num_capsules=8, capsule_dim=capsule_dim)
+        self.capsule_formation = CapsuleFormation(input_dim=50176, num_capsules=4, capsule_dim=capsule_dim)
+        self.routing = SelfAttentionRouting(num_capsules=4, capsule_dim=capsule_dim)
         self.eye_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
         self.face_decoder = RegionDecoder(capsule_dim, hidden_dim, output_dim)
         self.fusion = GazeFusion(output_dim * 2, output_dim)
@@ -147,5 +146,3 @@ class GazeEstimationModel(nn.Module):
         combined_output = torch.cat([eye_output, face_output], dim=1)
         output = self.fusion(combined_output)
         return output
-
-
