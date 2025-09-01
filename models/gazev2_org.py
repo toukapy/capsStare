@@ -21,6 +21,10 @@ class FrozenEncoder(nn.Module):
         for param in self.features.parameters():
             param.requires_grad = False
 
+        # Ejemplo: descongelar solo el último bloque
+        for param in self.features[-1].parameters():
+            param.requires_grad = True
+
         # Unfreeze the last few parameters (or blocks) as specified by trainable_layers.
         # Note: This simple approach unfreezes the last 'trainable_layers' parameters; depending on your needs,
         # you might want to unfreeze whole blocks instead.
@@ -125,7 +129,7 @@ class GazeFusion(nn.Module):
         return self.fc(fused)
 
 class GazeEstimationModel(nn.Module):
-    def __init__(self, encoder, capsule_dim=256, hidden_dim=256, output_dim=2):
+    def __init__(self, encoder, capsule_dim=64, hidden_dim=128, output_dim=2):
         super(GazeEstimationModel, self).__init__()
         self.encoder = encoder
         self.capsule_formation = CapsuleFormation(input_dim=50176, num_capsules=4, capsule_dim=capsule_dim)
@@ -135,6 +139,11 @@ class GazeEstimationModel(nn.Module):
         self.fusion = GazeFusion(output_dim * 2, output_dim)
 
     def forward(self, x):
+        # Handle both sequence (5D) and single frame (4D) inputs
+        if len(x.size()) == 4:
+            # Single frame - add temporal dimension
+            x = x.unsqueeze(1)  # Shape becomes [B, 1, C, H, W]
+
         B, T, C, H, W = x.size()
         x = x.view(B * T, C, H, W)
         features = self.encoder(x)
@@ -145,4 +154,9 @@ class GazeEstimationModel(nn.Module):
         face_output = self.face_decoder(routed_capsules)
         combined_output = torch.cat([eye_output, face_output], dim=1)
         output = self.fusion(combined_output)
+
+        # If input was single frame, remove temporal dimension
+        if len(x.size()) == 4:
+            output = output.squeeze(1)
+
         return output

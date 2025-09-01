@@ -13,6 +13,21 @@ from accelerate import Accelerator
 from collections import OrderedDict
 import wandb
 
+# Fijar semillas
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)  # si usas multi-GPU
+
+# Hacer operaciones deterministas
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# (Opcional) evitar que variables de entorno cambien
+os.environ["PYTHONHASHSEED"] = str(seed)
+
 
 # Optimización CUDA
 import torch.backends.cudnn as cudnn
@@ -125,22 +140,35 @@ if __name__ == "__main__":
     train_subset = Subset(train_dataset, train_indices)
     val_subset = Subset(val_dataset, val_indices)
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4, pin_memory=False)
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, drop_last=True, num_workers=4, pin_memory=False)
+    g = torch.Generator()
+    g.manual_seed(seed)
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4, pin_memory=False, generator=g, worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id))
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, drop_last=True, num_workers=4, pin_memory=False, generator=g, worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id))
 
 
     # Modelo y entrenamiento optimizado
-    from models.gazev2_noatt import FrozenEncoder, GazeEstimationModel
+    from models.gazev2_org import FrozenEncoder, GazeEstimationModel
 
     encoder = FrozenEncoder()
     model = GazeEstimationModel(encoder, output_dim=2).to(device)
 
-    checkpoint = torch.load('17062025.pth')
-    state_dict = strip_prefix(checkpoint)
-    model.load_state_dict(state_dict, strict=False)
+    optimizer = torch.optim.AdamW([
+        {"params": model.encoder.parameters(), "lr": 1e-6},  # Backbone
+        {"params": model.capsule_formation.parameters(), "lr": 1e-5},
+        {"params": model.routing.parameters(), "lr": 1e-5},
+        {"params": model.eye_decoder.parameters(), "lr": 1e-5},
+        {"params": model.face_decoder.parameters(), "lr": 1e-5},
+        {"params": model.fusion.parameters(), "lr": 1e-5},
+    ], weight_decay=1e-5)
+
+    #checkpoint = torch.load('17062025.pth')
+    #state_dict = strip_prefix(checkpoint)
+    #model.load_state_dict(state_dict, strict=False)
     model = torch.compile(model)  # PyTorch 2.0 optimization
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-6, weight_decay=1e-5)
+    # Learning rates separados: más bajo para el encoder
+
     criterion = nn.MSELoss()
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)

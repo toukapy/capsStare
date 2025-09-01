@@ -1,254 +1,186 @@
-import tensorflow as tf
-import numpy as np
-import cv2
 import os
-from tqdm import tqdm
+import cv2
+import torch
 import argparse
-from glob import glob
-from scipy.io import loadmat
+import numpy as np
+from tqdm import tqdm
 from PIL import Image
-
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
 from models.Vgg16 import vgg16_model
+import tensorflow as tf
+from tensorflow.keras.models import load_model
 
-# Configure TensorFlow to use CPU only
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
-def load_metadata(data_root):
-    metadata_path = os.path.join(data_root, 'metadata.mat')
-    print(f"Loading metadata from: {metadata_path}")
-    raw_metadata = loadmat(metadata_path)
+def convert_3d_to_2d_gaze(gaze_3d):
+    x, y, z = gaze_3d
+    y = np.clip(y, -1.0, 1.0)
+    pitch = np.arcsin(-y)
+    yaw = np.arctan2(-x, -z)
+    return np.array([pitch, yaw], dtype=np.float32)
 
-    metadata = {
-        'frame': raw_metadata['frame'].flatten(),
-        'recording': raw_metadata['recording'].flatten(),
-        'gaze_dir': raw_metadata['gaze_dir'],
-        'split': raw_metadata['split'].flatten(),
-        'person_identity': raw_metadata['person_identity'].flatten(),
-        'head_bbox': raw_metadata['person_head_bbox']
-    }
 
-    print(f"Total frames in metadata: {len(metadata['frame'])}")
-    print(f"Split values found: {np.unique(metadata['split'])}")
-    print(f"Number of frames per split: {np.bincount(metadata['split'])}")
-    return metadata
+def angular_error_2d(gt, pred):
+    def to_vec(angles):
+        pitch, yaw = angles
+        x = -np.cos(pitch) * np.sin(yaw)
+        y = -np.sin(pitch)
+        z = -np.cos(pitch) * np.cos(yaw)
+        return np.array([x, y, z])
 
-def get_test_frames(data_root, metadata):
-    """Get all test frames with their metadata."""
-    frame_data = []
-    rec_dirs = sorted(glob(os.path.join(data_root, 'imgs', 'rec_*')))
-    print(f"\nFound {len(rec_dirs)} recording directories")
+    dot = np.clip(np.dot(to_vec(gt), to_vec(pred)), -1.0, 1.0)
+    return np.degrees(np.arccos(dot))
 
-    for rec_dir in rec_dirs:
-        rec_num = int(os.path.basename(rec_dir).split('_')[1])
-        head_dir = os.path.join(rec_dir, 'head')
 
-        try:
-            person_dirs = [d for d in os.listdir(head_dir)
-                           if os.path.isdir(os.path.join(head_dir, d)) and d.isdigit()]
-        except FileNotFoundError:
-            print(f"Warning: Head directory not found: {head_dir}")
-            continue
+class MPIIFaceGazeDataset(Dataset):
+    def __init__(self, data_dir, subject_ids):
+        self.samples = []
+        self.transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
 
-        for person_id in person_dirs:
-            person_path = os.path.join(head_dir, person_id)
-            img_files = sorted(glob(os.path.join(person_path, '*.jpg')))
+        for subject_id in subject_ids:
+            txt_path = os.path.join(data_dir, subject_id, f"{subject_id}.txt")
+            if not os.path.exists(txt_path):
+                print(f"Warning: {txt_path} not found")
+                continue
 
-            for img_file in img_files:
-                try:
-                    img_pil = Image.open(img_file)
-                    img_np = np.array(img_pil)
-                    if img_np.size == 0:
-                        print(f"Warning: Empty image array for {img_file}")
+            with open(txt_path, "r") as f:
+                for line in f:
+                    cols = line.strip().split()
+                    if len(cols) < 28:
                         continue
 
-                    if len(img_np.shape) == 3:
-                        img = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                    else:
-                        img = img_np
+                    rel_img_path = cols[0]
+                    img_path = os.path.join(data_dir, subject_id, rel_img_path)
+                    if not os.path.exists(img_path):
+                        continue
 
-                except Exception as e:
-                    print(f"Image load failed for {img_file}: {e}")
-                    continue
+                    fc = np.array([float(cols[21]), float(cols[22]), float(cols[23])], dtype=np.float32)
+                    gt = np.array([float(cols[24]), float(cols[25]), float(cols[26])], dtype=np.float32)
+                    gaze_vec = gt - fc
 
-                frame_num = int(os.path.splitext(os.path.basename(img_file))[0])
+                    self.samples.append((img_path, gaze_vec))
 
-                matching_indices = np.where(
-                    (metadata['recording'] == rec_num) &
-                    (metadata['person_identity'] == int(person_id))
-                )[0]
+        if len(self.samples) == 0:
+            raise RuntimeError(f"No valid samples found for subjects: {subject_ids}")
 
-                if len(matching_indices) == 0:
-                    continue
+    def __len__(self):
+        return len(self.samples)
 
-                meta_idx = None
-                for idx in matching_indices:
-                    if metadata['frame'][idx] == frame_num:
-                        meta_idx = idx
-                        break
-
-                if meta_idx is None:
-                    continue
-
-                if metadata['split'][meta_idx] != 2:
-                    continue
-
-                #print(metadata['head_bbox'][meta_idx])
-                if np.all(metadata['head_bbox'][meta_idx] == 0):
-                    continue
-
-                frame_data.append({
-                    'path': img_file,
-                    'frame': frame_num,
-                    'recording': rec_num,
-                    'gaze_dir': metadata['gaze_dir'][meta_idx],
-                    'head_bbox': metadata['head_bbox'][meta_idx],
-                    'person_id': metadata['person_identity'][meta_idx]
-                })
-
-    print(f"\nFound {len(frame_data)} valid test frames total")
-    return frame_data
+    def __getitem__(self, idx):
+        img_path, gaze_3d = self.samples[idx]
+        img = Image.open(img_path).convert('RGB')
+        img_tensor = self.transform(img)
+        # Convert to channel-last format for TensorFlow
+        img_np = img_tensor.numpy().transpose(1, 2, 0)  # (3, 224, 224) -> (224, 224, 3)
+        gaze_2d = convert_3d_to_2d_gaze(gaze_3d)
+        return img_np, gaze_2d
 
 
-def angular_error_3d(gt_3d, pred_2d):
-    pred_3d = np.array([pred_2d[0], pred_2d[1], 1.0])
-    gt_3d_norm = gt_3d / np.linalg.norm(gt_3d)
-    pred_3d_norm = pred_3d / np.linalg.norm(pred_3d)
-    dot_product = np.clip(np.dot(gt_3d_norm, pred_3d_norm), -1.0, 1.0)
-    angle_rad = np.arccos(dot_product)
-    return np.degrees(angle_rad)
+def load_vgg16_model(model_path):
+    """Load your existing VGG16 model with weights"""
+    tf.keras.backend.clear_session()
+    model = vgg16_model()
+    model.load_weights(model_path)
+    return model
 
 
-def crop_head_image(full_image, head_bbox):
-    """
-    Crop the head from the full image using the normalized bounding box.
-    """
-    # Full image dimensions (3382 x 4096)
-    full_width, full_height, _ = full_image.shape
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', type=str, required=True)
+    parser.add_argument('--train_subjects', nargs='+', required=True)
+    parser.add_argument('--val_subjects', nargs='+', required=True)
+    parser.add_argument('--model_path', type=str, required=True)
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--batch_size', type=int, default=32)
+    args = parser.parse_args()
 
-    # Convert normalized head bbox to pixel values
-    x, y, w, h = head_bbox
-    x1 = int(x * full_width)
-    y1 = int(y * full_height)
-    x2 = int((x + w) * full_width)
-    y2 = int((y + h) * full_height)
+    # Force TensorFlow to use CPU to match your original setup
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
-    # Ensure bounding box is within image dimensions and not out of bounds
-    x1, y1 = max(x1, 0), max(y1, 0)
-    x2, y2 = min(x2, full_width), min(y2, full_height)
+    # Load your existing VGG16 model
+    model = load_vgg16_model(args.model_path)
+    print("Loaded VGG16 model with pretrained weights")
 
-    # Print bounding box for debugging
-    print(f"Bounding box: x1={x1}, y1={y1}, x2={x2}, y2={y2}")
+    # Create datasets
+    train_dataset = MPIIFaceGazeDataset(args.data_dir, args.train_subjects)
+    val_dataset = MPIIFaceGazeDataset(args.data_dir, args.val_subjects)
 
-    # Check if the crop region is valid (non-empty)
-    if x2 <= x1 or y2 <= y1:
-        print(f"Invalid crop region: ({x1}, {y1}) to ({x2}, {y2})")
-        return None  # Return None if crop is invalid
+    # Training loop
+    best_val_error = float('inf')
+    for epoch in range(args.epochs):
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
 
-    # Crop the head from the full image
-    head_crop = full_image[y1:y2, x1:x2]
+        # Training phase
+        train_errors = []
+        for i in tqdm(range(0, len(train_dataset), args.batch_size), desc="Training"):
+            batch_imgs = []
+            batch_labels = []
 
-    # Check if the head crop is empty
-    if head_crop.size == 0:
-        print("Empty head crop!")
-        return None
+            # Create batch
+            for j in range(i, min(i + args.batch_size, len(train_dataset))):
+                img, label = train_dataset[j]
+                batch_imgs.append(img)
+                batch_labels.append(label)
 
-    return head_crop
+            if not batch_imgs:
+                continue
 
+            batch_imgs = np.stack(batch_imgs)  # Will be (batch_size, 224, 224, 3)
+            batch_labels = np.stack(batch_labels)
 
-def process_single_image(model, image_path, head_bbox):
-    full_image = cv2.imread(image_path)
+            # Train step
+            with tf.GradientTape() as tape:
+                predictions = model(batch_imgs, training=True)
+                loss = tf.keras.losses.MSE(batch_labels, predictions)
 
-    if full_image is None:
-        print(f"Failed to load image at: {image_path}")
-        return None
+            gradients = tape.gradient(loss, model.trainable_variables)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=1e-5)
+            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
-    head_crop = crop_head_image(full_image, head_bbox)
+            # Calculate errors
+            for gt, pred in zip(batch_labels, predictions):
+                train_errors.append(angular_error_2d(gt, pred))
 
-    if head_crop is None:
-        return None
+        # Validation phase
+        val_errors = []
+        for i in tqdm(range(0, len(val_dataset), args.batch_size), desc="Validation"):
+            batch_imgs = []
+            batch_labels = []
 
-    try:
-        head_crop_resized = cv2.resize(head_crop, (224, 224))
-    except cv2.error as e:
-        print(f"Error resizing image: {e}")
-        return None
+            for j in range(i, min(i + args.batch_size, len(val_dataset))):
+                img, label = val_dataset[j]
+                batch_imgs.append(img)
+                batch_labels.append(label)
 
-    # Ensure the model input is batch-shaped
-    prediction = model.predict(np.expand_dims(head_crop_resized, axis=0))[0]
+            if not batch_imgs:
+                continue
 
-    if prediction.shape[0] != 2:
-        print(f"Unexpected prediction shape: {prediction.shape} from image {image_path}")
-        return None
+            batch_imgs = np.stack(batch_imgs)
+            predictions = model(batch_imgs, training=False)
 
-    return prediction
+            for gt, pred in zip(batch_labels, predictions):
+                val_errors.append(angular_error_2d(gt, pred))
+
+        # Print epoch statistics
+        avg_train_error = np.mean(train_errors)
+        avg_val_error = np.mean(val_errors)
+
+        print(f"Train AE: {avg_train_error:.2f}°")
+        print(f"Val AE: {avg_val_error:.2f}°")
+
+        # Save best model
+        #if avg_val_error < best_val_error:
+        #    best_val_error = avg_val_error
+        #    model.save_weights('best_vgg16_mpiifacegaze.h5')
+        #    print(f"New best model saved with val AE: {best_val_error:.2f}°")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Gaze360 VGG16 Evaluation')
-    parser.add_argument('--data_root', type=str, default='gaze360_dataset')
-    parser.add_argument('--model_weights', type=str, default='models/checkpoint.weights.10-0.02.hdf5')
-    args = parser.parse_args()
-
-    tf.keras.backend.clear_session()
-    print("Initializing model...")
-    model = vgg16_model()
-    model.load_weights(args.model_weights)
-
-    print("Loading Gaze360 metadata...")
-    metadata = load_metadata(args.data_root)
-
-    print("Getting test frames...")
-    test_frames = get_test_frames(args.data_root, metadata)
-    print(f"Found {len(test_frames)} test frames")
-
-    all_errors = []
-    person_errors = {}
-    recording_errors = {}
-
-    print("\nProcessing frames...")
-    for frame in tqdm(test_frames):
-        prediction = process_single_image(model, frame['path'], frame['head_bbox'])
-
-        if prediction is None:
-            continue  # Skip invalid predictions
-
-        error = angular_error_3d(frame['gaze_dir'], prediction)
-
-        if not np.isnan(error):
-            all_errors.append(error)
-            person_errors.setdefault(frame['person_id'], []).append(error)
-            recording_errors.setdefault(frame['recording'], []).append(error)
-
-
-
-
-
-    if all_errors:
-        print("\nOverall Results:")
-        print(f"Mean Angular Error: {np.mean(all_errors):.2f}°")
-        print(f"Std Angular Error: {np.std(all_errors):.2f}°")
-        print(f"Median Angular Error: {np.median(all_errors):.2f}°")
-        print(f"Total valid samples: {len(all_errors)}")
-
-        print("\nPer-Person Results:")
-        for person_id, errors in sorted(person_errors.items()):
-            print(f"Person {person_id}:\n  Mean Error: {np.mean(errors):.2f}°\n  Samples: {len(errors)}")
-
-        print("\nPer-Recording Results:")
-        for rec_num, errors in sorted(recording_errors.items()):
-            print(f"Recording {rec_num:03d}:\n  Mean Error: {np.mean(errors):.2f}°\n  Samples: {len(errors)}")
-
-        results = {
-            'all_errors': all_errors,
-            'person_errors': person_errors,
-            'recording_errors': recording_errors,
-            'overall_mean': np.mean(all_errors),
-            'overall_std': np.std(all_errors)
-        }
-        np.save('gaze360_vgg16_results.npy', results)
-        print("\nResults saved to gaze360_vgg16_results.npy")
-    else:
-        print("No valid predictions were made during evaluation.")
+    main()
 
 
 
