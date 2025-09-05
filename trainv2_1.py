@@ -294,7 +294,7 @@ if __name__ == "__main__":
 
     encoder = FrozenEncoder()
     model = GazeEstimationModel(encoder, output_dim=2).cuda()
-    # model.load_state_dict(torch.load('best_gaze_model.pth'))
+    # model.load_state_dict(torch.load('04092025.pth'))
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)
     criterion = nn.MSELoss()
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
@@ -306,7 +306,7 @@ if __name__ == "__main__":
     best_val_loss = float('inf')
     patience_limit = 15
     patience_counter = 0
-    best_model_path = 'best_gaze_model.pth'
+    best_model_path = '04092025.pth'
 
 
     def collate_fn(batch):

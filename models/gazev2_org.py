@@ -71,7 +71,7 @@ class SelfAttentionRouting(nn.Module):
     def __init__(self, num_capsules, capsule_dim, heads=4):
         super(SelfAttentionRouting, self).__init__()
         self.multihead_attn = nn.MultiheadAttention(embed_dim=capsule_dim, num_heads=heads)
-        self.dropout = nn.Dropout(p=0.5)  # Added Dropout
+        self.dropout = nn.Dropout(p=0.2)  # Added Dropout
 
     def forward(self, capsules):
         if len(capsules.size()) == 3:
@@ -95,7 +95,7 @@ class RegionDecoder(nn.Module):
         super(RegionDecoder, self).__init__()
         self.gru = nn.GRU(capsule_dim, hidden_dim, batch_first=True)
         self.fc = nn.Linear(hidden_dim, output_dim)
-        self.dropout = nn.Dropout(p=0.3)  # Added Dropout
+        self.dropout = nn.Dropout(p=0.2)  # Added Dropout
 
     def forward(self, capsules):
         if len(capsules.size()) == 3:
@@ -118,7 +118,7 @@ class GazeFusion(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(GazeFusion, self).__init__()
         self.fc = nn.Linear(input_dim, output_dim)
-        self.dropout = nn.Dropout(p=0.3)  # Added Dropout
+        self.dropout = nn.Dropout(p=0.1)  # Added Dropout
 
     def forward(self, regions):
         if isinstance(regions, list):
@@ -129,7 +129,7 @@ class GazeFusion(nn.Module):
         return self.fc(fused)
 
 class GazeEstimationModel(nn.Module):
-    def __init__(self, encoder, capsule_dim=64, hidden_dim=128, output_dim=2):
+    def __init__(self, encoder, capsule_dim=256, hidden_dim=512, output_dim=2):
         super(GazeEstimationModel, self).__init__()
         self.encoder = encoder
         self.capsule_formation = CapsuleFormation(input_dim=50176, num_capsules=4, capsule_dim=capsule_dim)

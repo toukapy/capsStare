@@ -161,7 +161,7 @@ if __name__ == "__main__":
         scheduler.step(avg_val_loss)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_gaze_model.pth')
+            torch.save(model.state_dict(), '04092025.pth')
             patience_counter = 0
         else:
             patience_counter += 1

@@ -1,17 +1,19 @@
+import os
 import cv2
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import torchvision.transforms.functional as TF
 import torchvision.transforms.v2 as F
-import torch
-import numpy as np
+from torchvision import transforms
 import random
 
-torch.random.manual_seed(42)
-
-import numpy as np
-import cv2
+# -----------------------
+# Reproducibilidad
+# -----------------------
+torch.manual_seed(42)
+random.seed(42)
+np.random.seed(42)
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -32,26 +34,36 @@ def draw_gaze(image_in, pitchyaw, thickness=2, color=(0, 0, 255)):
     """
     Draw gaze angle on the given image.
     Args:
-        image_in (numpy.array): Input image.
-        pitchyaw (array-like): Array of 2 angles (pitch, yaw) in radians.
+        image_in (numpy.array): Input image BGR.
+        pitchyaw (array-like): [pitch, yaw] in radians.
         thickness (int): Line thickness.
-        color (tuple): Arrow color.
+        color (tuple): BGR color.
     Returns:
         Image with the gaze arrow drawn.
     """
     image_out = image_in.copy()
-    (h, w) = image_in.shape[:2]
+    h, w = image_out.shape[:2]
     length = w / 2.0
-    pos = (int(h / 2.0), int(w / 2.0))
+
+    # OpenCV usa coordenadas (x, y). Centro en píxeles:
+    cx, cy = int(w / 2.0), int(h / 2.0)
+
     if len(image_out.shape) == 2 or image_out.shape[2] == 1:
         image_out = cv2.cvtColor(image_out, cv2.COLOR_GRAY2BGR)
-    dx = -length * np.sin(pitchyaw[1]) * np.cos(pitchyaw[0])
-    dy = -length * np.sin(pitchyaw[0])
-    # Note: OpenCV expects (x,y) coordinates: here we use [column, row]
+
+    pitch, yaw = float(pitchyaw[0]), float(pitchyaw[1])
+
+    # Conversión estándar para flecha 2D desde (pitch, yaw)
+    dx = -length * np.sin(yaw) * np.cos(pitch)
+    dy = -length * np.sin(pitch)
+
+    start_pt = (cx, cy)
+    end_pt = (int(round(cx + dx)), int(round(cy + dy)))
+
     cv2.arrowedLine(
         image_out,
-        tuple(np.round(pos).astype(np.int32)),
-        tuple(np.round([pos[0] + dy, pos[1] + dx]).astype(int)),
+        start_pt,
+        end_pt,
         color,
         thickness,
         cv2.LINE_AA,
@@ -59,93 +71,110 @@ def draw_gaze(image_in, pitchyaw, thickness=2, color=(0, 0, 255)):
     )
     return image_out
 
+def visualize_predicted_and_groundtruth_gaze(model, dataset, sample_idx, device, target_frame=-1, save_path="gaze_overlay.png"):
+    """
+    Carga una muestra (secuencia) del dataset en sample_idx, pasa la secuencia completa por el modelo
+    y visualiza sobre el MISMO frame (target_frame) la flecha del GT (verde) y la predicción (rojo).
 
-def visualize_predicted_and_groundtruth_gaze(model, dataset, sample_idx, device):
+    target_frame: índice del frame dentro de la secuencia a visualizar (por defecto -1: último).
     """
-    Loads a sample from the dataset, runs it through the model to obtain the predicted gaze,
-    and then overlays both the predicted (red) and the ground truth (green) gaze arrows
-    on the un-normalized image.
-    """
-    # Get sample from dataset; face_patches shape: (T, C, H, W) and gazes: (T, 2)
+    assert 0 <= sample_idx < len(dataset), f"sample_idx fuera de rango: {sample_idx}"
+
+    # face_patches: (T, C, H, W), gazes: (T, 2) con (yaw, pitch) normalmente en XGaze/RT-GENE
     face_patches, gazes = dataset[sample_idx]
-    # For visualization, use the first frame for the image.
-    face_patch = face_patches[0]  # (C, H, W)
-    # Use the last frame's gaze as ground truth.
-    gt_gaze = gazes[-1]  # (2,)
+    T = face_patches.shape[0]
+    if target_frame < 0:
+        target_frame = T + target_frame  # p.ej. -1 -> T-1
+    assert 0 <= target_frame < T, f"target_frame fuera de rango: {target_frame} (T={T})"
 
-    # Un-normalize the face patch.
+    # Selecciona el frame a mostrar (mismo que GT y mismo que usaremos para alinear la predicción)
+    face_patch = face_patches[target_frame]  # (C, H, W)
+
+    # Un-normalize para visualizar
     face_patch_unnorm = unnormalize_image(face_patch, IMAGENET_MEAN, IMAGENET_STD)
-    # Convert tensor from (C, H, W) in RGB to a NumPy array in RGB.
     face_patch_rgb = (face_patch_unnorm.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-    # Convert RGB to BGR for OpenCV drawing.
     face_patch_bgr = cv2.cvtColor(face_patch_rgb, cv2.COLOR_RGB2BGR)
 
-    # Prepare input for the model: add batch dimension (B=1, T remains).
-    input_tensor = face_patches.unsqueeze(0).to(device)
+    # Ground truth para ese mismo frame
+    # OJO: muchos datasets guardan (yaw, pitch). La función draw_gaze espera [pitch, yaw].
+    gt_yaw, gt_pitch = gazes[target_frame].cpu().numpy().tolist()
+    gt_pitchyaw = [gt_pitch, gt_yaw]
+
+    # Preparar input al modelo (secuencia completa)
+    input_tensor = face_patches.unsqueeze(0).to(device)  # (1, T, C, H, W) o lo que tu modelo espere
     model.eval()
     with torch.no_grad():
-        # Run the model to get the predicted gaze; expected shape (1, 2)
-        pred_gaze = model(input_tensor)
-    pred_gaze_np = pred_gaze.cpu().numpy()[0]
-    gt_gaze_np = gt_gaze.cpu().numpy()
+        pred = model(input_tensor)
 
-    gt_pitch = gt_gaze_np[1]
-    gt_yaw = gt_gaze_np[0]
-    overlay_img = draw_gaze(face_patch_bgr, [gt_pitch, gt_yaw], thickness=2, color=(0, 255, 0))
+    # Soportar dos casos comunes:
+    # 1) pred.shape == (B, 2): una sola predicción para la secuencia (normalmente el último frame)
+    # 2) pred.shape == (B, T, 2): una predicción por frame
+    if pred.dim() == 2 and pred.shape[-1] == 2:
+        pred_yaw, pred_pitch = pred[0].detach().cpu().numpy().tolist()
+    elif pred.dim() == 3 and pred.shape[-1] == 2:
+        # Escoge la predicción del mismo frame que estamos visualizando
+        pred_yaw, pred_pitch = pred[0, target_frame].detach().cpu().numpy().tolist()
+    else:
+        raise ValueError(f"Forma de la predicción no soportada: {tuple(pred.shape)}")
 
-    # Draw predicted gaze arrow in red.
-    pred_pitvh = pred_gaze_np[1]
-    pred_yaw = pred_gaze_np[0]
-    overlay_img = draw_gaze(overlay_img, [pred_pitvh, pred_yaw], thickness=2, color=(0, 0, 255))
-    # Draw ground truth gaze arrow in green on the same image.
-    # If ground truth is stored as (yaw, pitch) but code expects (pitch, yaw):
+    pred_pitchyaw = [pred_pitch, pred_yaw]
 
+    # Dibuja GT (verde) y Pred (rojo) sobre el MISMO frame
+    overlay_img = draw_gaze(face_patch_bgr, gt_pitchyaw, thickness=2, color=(0, 255, 0))   # GT en verde
+    overlay_img = draw_gaze(overlay_img,       pred_pitchyaw, thickness=2, color=(0, 0, 255))  # Pred en rojo
 
-    # Convert back to RGB for matplotlib.
+    # Guardar figura
     overlay_img_rgb = cv2.cvtColor(overlay_img, cv2.COLOR_BGR2RGB)
     plt.figure(figsize=(6, 6))
     plt.imshow(overlay_img_rgb)
-    plt.title("Predicted (red) vs. Ground Truth (green) Gaze yes!")
+    plt.title("Predicción (rojo) vs Ground Truth (verde)")
     plt.axis("off")
-    plt.savefig(f"gaze_500_test.png")
-
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"Guardado en {save_path}")
 
 def load_model_state(model, checkpoint_path, device):
-    # Load the state dict from the checkpoint
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    # Create a new state dict with keys stripped of the "_orig_mod." prefix
+    # Carga state dict desde checkpoint (.pth o .pt)
+    state = torch.load(checkpoint_path, map_location=device)
+    # Si viene como {'state_dict': ...}, desempaqueta
+    state_dict = state.get('state_dict', state)
+
+    # Elimina prefijo "_orig_mod." si existe
     new_state_dict = {}
-    for key, value in state_dict.items():
-        new_key = key
-        if key.startswith("_orig_mod."):
-            new_key = key[len("_orig_mod."):]
-        new_state_dict[new_key] = value
-    # Load the processed state dict into the model (strict=False to allow minor mismatches)
+    for k, v in state_dict.items():
+        new_k = k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k
+        new_state_dict[new_k] = v
+
     model.load_state_dict(new_state_dict, strict=False)
 
-# Example usage:
+# -----------------------
+# Ejemplo de uso
+# -----------------------
 from trainv2 import GazeDataset
-from torchvision import transforms
+from models import gazev2_org
 
-import os
-from models import gazev2
-#
-# # Get list of h5 files from your training folder
-h5_files = [os.path.join("xgaze_224/test", f) for f in os.listdir("xgaze_224/test") if f.endswith(".h5")]
+h5_files = [os.path.join("xgaze_224/train", f) for f in os.listdir("xgaze_224/train") if f.endswith(".h5")]
 
 transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
 ])
-#
-# # Create your dataset; if your dataset already includes transforms, use them here.
-dataset = GazeDataset(h5_files, sequence_length=1, transform=transform)
-#
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = gazev2.GazeEstimationModel(gazev2.FrozenEncoder()).to(device)
-load_model_state(model, "27032025.pth", device)
 
-#
-# # Visualize predicted gaze for a sample (e.g., sample index 40)
-visualize_predicted_and_groundtruth_gaze(model, dataset, sample_idx=500, device=device)
+dataset = GazeDataset(h5_files, sequence_length=12, transform=transform)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = gazev2_org.GazeEstimationModel(gazev2_org.FrozenEncoder()).to(device)
+load_model_state(model, "05092025.pth", device)
+
+# Visualiza el sample deseado: MISMO frame para imagen, GT y pred.
+# target_frame = -1 usa el último; cambia a 0..T-1 si quieres otro.
+visualize_predicted_and_groundtruth_gaze(
+    model,
+    dataset,
+    sample_idx=360000,
+    device=device,
+    target_frame=-1,
+    save_path="gaze_190000_last.png"
+)

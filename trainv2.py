@@ -52,7 +52,7 @@ def angular_error_2d_fixed_origin(gt_2d, pred_2d):
     return np.degrees(angle_rad)
 
 class GazeDataset(Dataset):
-    def __init__(self, h5_files, sequence_length=9, transform=None):
+    def __init__(self, h5_files, sequence_length=12, transform=None):
         self.h5_files = h5_files
         self.fids = [h5py.File(h5_file, 'r') for h5_file in h5_files]
         self.sequence_length = sequence_length
@@ -121,30 +121,20 @@ if __name__ == "__main__":
     # Carga de datos optimizada
     train_dir = 'xgaze_224/train'
     h5_files = [os.path.join(train_dir, f) for f in os.listdir(train_dir) if f.endswith('.h5')]
-    random.shuffle(h5_files)
+    rng = random.Random(seed)
+    rng.shuffle(h5_files)
 
     train_size = int(0.8 * len(h5_files))
     train_files, val_files = h5_files[:train_size], h5_files[train_size:]
 
-
-
     train_dataset = GazeDataset(train_files, transform=transform)
     val_dataset = GazeDataset(val_files, transform=transform)
-
-    train_sample_size = 1000
-    val_sample_size = 200
-
-    train_indices = random.sample(range(len(train_dataset)), train_sample_size)
-    val_indices = random.sample(range(len(val_dataset)), val_sample_size)
-
-    train_subset = Subset(train_dataset, train_indices)
-    val_subset = Subset(val_dataset, val_indices)
 
     g = torch.Generator()
     g.manual_seed(seed)
 
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, drop_last=True, num_workers=4, pin_memory=False, generator=g, worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id))
-    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, drop_last=True, num_workers=4, pin_memory=False, generator=g, worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id))
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, drop_last=True, num_workers=4, pin_memory=False, generator=g, worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id))
 
 
     # Modelo y entrenamiento optimizado
@@ -154,17 +144,17 @@ if __name__ == "__main__":
     model = GazeEstimationModel(encoder, output_dim=2).to(device)
 
     optimizer = torch.optim.AdamW([
-        {"params": model.encoder.parameters(), "lr": 1e-6},  # Backbone
-        {"params": model.capsule_formation.parameters(), "lr": 1e-5},
-        {"params": model.routing.parameters(), "lr": 1e-5},
-        {"params": model.eye_decoder.parameters(), "lr": 1e-5},
-        {"params": model.face_decoder.parameters(), "lr": 1e-5},
-        {"params": model.fusion.parameters(), "lr": 1e-5},
+        {"params": model.encoder.parameters(), "lr": 1e-7},  # Backbone
+        {"params": model.capsule_formation.parameters(), "lr": 1e-6},
+        {"params": model.routing.parameters(), "lr": 1e-6},
+        {"params": model.eye_decoder.parameters(), "lr": 1e-6},
+        {"params": model.face_decoder.parameters(), "lr": 1e-6},
+        {"params": model.fusion.parameters(), "lr": 1e-6},
     ], weight_decay=1e-5)
 
-    #checkpoint = torch.load('17062025.pth')
-    #state_dict = strip_prefix(checkpoint)
-    #model.load_state_dict(state_dict, strict=False)
+    checkpoint = torch.load('04092025.pth')
+    state_dict = strip_prefix(checkpoint)
+    model.load_state_dict(state_dict, strict=False)
     model = torch.compile(model)  # PyTorch 2.0 optimization
 
     # Learning rates separados: más bajo para el encoder
@@ -255,8 +245,8 @@ if __name__ == "__main__":
         scheduler.step(avg_val_loss)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_gaze_model.pth')
-            patience_counter = 0
+            torch.save(model.state_dict(), '05092025.pth')
+            patience = 0
         else:
             patience_counter += 1
         if patience_counter >= patience_limit:
