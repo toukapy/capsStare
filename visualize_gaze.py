@@ -166,7 +166,7 @@ dataset = GazeDataset(h5_files, sequence_length=12, transform=transform)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = gazev2_org.GazeEstimationModel(gazev2_org.FrozenEncoder()).to(device)
-load_model_state(model, "05092025.pth", device)
+load_model_state(model, "10092025.pth", device)
 
 # Visualiza el sample deseado: MISMO frame para imagen, GT y pred.
 # target_frame = -1 usa el último; cambia a 0..T-1 si quieres otro.

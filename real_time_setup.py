@@ -182,7 +182,7 @@ def draw_compass_axes(frame, origin, bbox, mapper: AxisMapper, scale_axes: int =
         end_pt = mapper.endpoint(d, origin, bbox, frame.shape)
         cv2.arrowedLine(frame, origin, end_pt, (120, 120, 120), 1, tipLength=0.18)
         lx = int(0.85*end_pt[0] + 0.15*origin[0])
-        ly = int(0.85*end_pt[1] + 0.15*origin[1]) - 2
+        ly = int(0.85*end_pt[1] + 0.15*origin[1])-2
         cv2.putText(frame, name.replace("UP-","U-").replace("DOWN-","D-"),
                     (lx, ly), cv2.FONT_HERSHEY_PLAIN, 0.8, (140, 140, 140), 1)
 
@@ -368,7 +368,7 @@ def run_calibration(cap, model, face_detector, preprocess_face, mapper, device, 
     T = np.stack(T_list, axis=0)
 
     calib = AffineCalibrator()
-    calib.fit(G, T, lam=1e-3)  # ridge regularization
+    calib.fit(G, T, lam=1e-1)  # ridge regularization
     return calib
 
 # ==========================
@@ -376,7 +376,7 @@ def run_calibration(cap, model, face_detector, preprocess_face, mapper, device, 
 # ==========================
 def main():
     face_detector = load_face_detector()
-    model = load_model('15082025.pth')
+    model = load_model('04092025.pth')
 
     cap = cv2.VideoCapture(0)
 
@@ -387,7 +387,7 @@ def main():
                           30,
                           (frame_width, frame_height))
 
-    sequence_length = 9
+    sequence_length = 12
     face_sequence = []
     prev_time = time.time()
 
@@ -401,7 +401,7 @@ def main():
         scale=150
     )
 
-    smoother = GazeSmoother(alpha=0.85)
+    smoother = GazeSmoother(alpha=0.4)
     calibrator = AffineCalibrator()  # vacío hasta calibrar
     show_axes = True  # si quieres dejar la brújula; no afecta a la calibración
 

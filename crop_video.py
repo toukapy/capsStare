@@ -1,9 +1,9 @@
 import cv2
 
-input_video = "gaze_last_result.avi"
+input_video = "gaze_output.avi"
 output_video = "gaze_output_cropped.avi"
 
-start_frame = 350   # skip the first 100 frames
+start_frame = 2500   # skip the first 100 frames
 end_frame = None    # or put a number like 1000 to stop earlier
 
 cap = cv2.VideoCapture(input_video)

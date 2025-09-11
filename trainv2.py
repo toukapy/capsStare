@@ -245,7 +245,7 @@ if __name__ == "__main__":
         scheduler.step(avg_val_loss)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), '05092025.pth')
+            torch.save(model.state_dict(), '10092025.pth')
             patience = 0
         else:
             patience_counter += 1
