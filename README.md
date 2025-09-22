@@ -24,4 +24,8 @@ CapStARE achieves state-of-the-art accuracy on ETH-XGaze, MPIIFaceGaze, and RT-G
 
 ## Repository Structure
 
+├── models/            # CapStARE architecture
+├── 
+└── README.md          # Project description
+
 
