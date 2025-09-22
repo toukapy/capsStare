@@ -24,8 +24,10 @@ CapStARE achieves state-of-the-art accuracy on ETH-XGaze, MPIIFaceGaze, and RT-G
 
 ## Repository Structure
 
-├── models/            # CapStARE architecture
-├── 
-└── README.md          # Project description
+## Citation
+
+## Contact
+
+For questions, open an issue or reach out at miren.samaniego@ehu.eus
 
 
