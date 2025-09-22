@@ -13,4 +13,15 @@ https://github.com/user-attachments/assets/b40557ce-3e4e-430a-bae2-310dd96884e5
 
 ## Benchmark Performance
 
+| Method       | ETH-XGaze ↓ | MPIIFaceGaze ↓ | Gaze360 ↓ | RT-GENE ↓ | Params |
+| ------------ | ----------- | -------------- | --------- | --------- | ------ |
+| FullFace     | 7.38°       | 4.93°          | 14.99°    | 10.0°     | 196M   |
+| Gaze360      | 4.46°       | 4.06°          | 11.04°    | 7.08°     | 11.9M  |
+| GazeCapsNet  | 5.75°       | 4.06°          | **5.10°** | –         | 11.7M  |
+| **CapStARE** | **3.36°**   | **2.65°**      | 9.06°     | **4.76°** | 13.0M  |
+
+CapStARE achieves state-of-the-art accuracy on ETH-XGaze, MPIIFaceGaze, and RT-GENE, while remaining lightweight and real-time.
+
+## Repository Structure
+
 
