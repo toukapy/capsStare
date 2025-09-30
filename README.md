@@ -26,6 +26,19 @@ CapStARE achieves state-of-the-art accuracy on ETH-XGaze, MPIIFaceGaze, and RT-G
 
 ## Citation
 
+If you use this code, please cite our work.
+
+´´´bibtext
+@misc{samaniego2025capstarecapsulebasedspatiotemporalarchitecture,
+      title={CapStARE: Capsule-based Spatiotemporal Architecture for Robust and Efficient Gaze Estimation}, 
+      author={Miren Samaniego and Igor Rodriguez and Elena Lazkano},
+      year={2025},
+      eprint={2509.19936},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2509.19936}, 
+}
+
 ## Contact
 
 For questions, open an issue or reach out at miren.samaniego@ehu.eus
